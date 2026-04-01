@@ -10,21 +10,6 @@ begin
 end;
 $$;
 
-create or replace function public.is_room_member(target_room_id uuid)
-returns boolean
-language sql
-stable
-security definer
-set search_path = public
-as $$
-  select exists (
-    select 1
-    from public.room_seats
-    where room_id = target_room_id
-      and user_id = auth.uid()
-  );
-$$;
-
 create table if not exists public.rooms (
   id uuid primary key default gen_random_uuid(),
   code text not null unique check (code ~ '^[A-Z2-9]{6}$'),
@@ -48,6 +33,21 @@ create table if not exists public.room_seats (
   unique (room_id, seat_role),
   unique (room_id, user_id)
 );
+
+create or replace function public.is_room_member(target_room_id uuid)
+returns boolean
+language sql
+stable
+security definer
+set search_path = public
+as $$
+  select exists (
+    select 1
+    from public.room_seats
+    where room_id = target_room_id
+      and user_id = auth.uid()
+  );
+$$;
 
 create table if not exists public.games (
   id uuid primary key default gen_random_uuid(),

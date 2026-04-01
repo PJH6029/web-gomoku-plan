@@ -1,6 +1,6 @@
 "use client";
 
-import { type Session } from "@supabase/supabase-js";
+import { type RealtimeChannel, type Session } from "@supabase/supabase-js";
 import { AlertTriangle, Clock3, Copy, DoorOpen, Flag, LoaderCircle, RefreshCcw, RotateCcw, ShieldAlert } from "lucide-react";
 import { useEffect, useEffectEvent, useState, useTransition } from "react";
 
@@ -10,6 +10,14 @@ import { getForbiddenBlackPoints } from "@/lib/game/renju";
 import type { Point } from "@/lib/game/types";
 import { hasPublicSupabaseEnv } from "@/lib/env";
 import { roomCodeSchema } from "@/lib/rooms/schemas";
+import {
+  applyOptimisticJoinSnapshot,
+  applyOptimisticMoveSnapshot,
+  applyOptimisticReadySnapshot,
+  applyOptimisticRematchVoteSnapshot,
+  applyOptimisticResignSnapshot,
+  reconcileSnapshotForViewer,
+} from "@/lib/rooms/snapshot";
 import type { RoomSnapshot } from "@/lib/rooms/types";
 import { ensureBrowserSession, getBrowserSupabaseClient } from "@/lib/supabase/client";
 
@@ -69,6 +77,16 @@ export function RoomShell({ code }: RoomShellProps) {
   const [loading, setLoading] = useState(true);
   const [now, setNow] = useState(Date.now());
   const [isPending, startTransition] = useTransition();
+  const isSeated = snapshot?.viewer.role !== null;
+
+  function applyRoomSnapshot(nextSnapshot: RoomSnapshot, nextSession: Session | null = session, nextNickname: string | null = nickname) {
+    if (!nextSession) {
+      setSnapshot(nextSnapshot);
+      return;
+    }
+
+    setSnapshot(reconcileSnapshotForViewer(nextSnapshot, nextSession.user.id, nextNickname));
+  }
 
   async function loadSnapshot(nextSession: Session, nextNickname: string) {
     const nextSnapshot = await apiRequest<RoomSnapshot>(`/api/rooms/${normalizedCode}`, nextSession.access_token, {
@@ -76,8 +94,8 @@ export function RoomShell({ code }: RoomShellProps) {
     });
 
     setSession(nextSession);
-    setSnapshot(nextSnapshot);
     setNickname(nextNickname);
+    applyRoomSnapshot(nextSnapshot, nextSession, nextNickname);
   }
 
   async function bootstrap(nextNickname: string) {
@@ -94,6 +112,22 @@ export function RoomShell({ code }: RoomShellProps) {
     if (session) {
       await loadSnapshot(session, nickname);
     }
+  });
+
+  const applyIncomingSnapshotFromEffect = useEffectEvent((nextSnapshot: RoomSnapshot) => {
+    applyRoomSnapshot(nextSnapshot);
+  });
+
+  const trackPresenceFromEffect = useEffectEvent(async (presenceChannel: RealtimeChannel) => {
+    if (!session || !snapshot?.viewer.role) {
+      return;
+    }
+
+    await presenceChannel.track({
+      userId: session.user.id,
+      nickname: snapshot.viewer.nickname ?? nickname,
+      role: snapshot.viewer.role,
+    });
   });
 
   useEffect(() => {
@@ -142,7 +176,7 @@ export function RoomShell({ code }: RoomShellProps) {
   }, [envReady]);
 
   useEffect(() => {
-    if (!session || !snapshot?.viewer.role) {
+    if (!session || !isSeated) {
       return;
     }
 
@@ -158,8 +192,9 @@ export function RoomShell({ code }: RoomShellProps) {
           filter: `room_code=eq.${normalizedCode}`,
         },
         (payload) => {
-          const nextSnapshot = payload.new.payload as RoomSnapshot;
-          setSnapshot(nextSnapshot);
+          if (payload.new.payload && typeof payload.new.payload === "object") {
+            applyIncomingSnapshotFromEffect(payload.new.payload as RoomSnapshot);
+          }
         },
       )
       .subscribe();
@@ -178,11 +213,7 @@ export function RoomShell({ code }: RoomShellProps) {
       })
       .subscribe(async (status) => {
         if (status === "SUBSCRIBED") {
-          await presenceChannel.track({
-            userId: session.user.id,
-            nickname: snapshot.viewer.nickname,
-            role: snapshot.viewer.role,
-          });
+          await trackPresenceFromEffect(presenceChannel);
         }
       });
 
@@ -190,7 +221,7 @@ export function RoomShell({ code }: RoomShellProps) {
       void supabase.removeChannel(eventsChannel);
       void supabase.removeChannel(presenceChannel);
     };
-  }, [envReady, normalizedCode, session, snapshot?.viewer.nickname, snapshot?.viewer.role]);
+  }, [envReady, isSeated, nickname, normalizedCode, session]);
 
   useEffect(() => {
     if (!session || !snapshot?.game?.deadlineAt || snapshot.game.status !== "active") {
@@ -204,12 +235,24 @@ export function RoomShell({ code }: RoomShellProps) {
     void refreshFromEffect();
   }, [nickname, now, session, snapshot?.game?.deadlineAt, snapshot?.game?.status]);
 
-  function runAction(action: () => Promise<void>) {
+  function runAction(
+    action: () => Promise<RoomSnapshot | void>,
+    optimisticUpdate?: (currentSnapshot: RoomSnapshot, viewerUserId: string, viewerNickname: string | null) => RoomSnapshot,
+  ) {
     startTransition(() => {
       void (async () => {
+        let previousSnapshot: RoomSnapshot | null = null;
+
         try {
           setError(null);
-          await action();
+          if (optimisticUpdate && session && snapshot) {
+            previousSnapshot = snapshot;
+            setSnapshot(optimisticUpdate(snapshot, session.user.id, snapshot.viewer.nickname ?? nickname));
+          }
+          const nextSnapshot = await action();
+          if (nextSnapshot) {
+            applyRoomSnapshot(nextSnapshot);
+          }
         } catch (caught) {
           if (caught instanceof ApiClientError) {
             const maybeSnapshot =
@@ -222,8 +265,12 @@ export function RoomShell({ code }: RoomShellProps) {
                 : null;
 
             if (maybeSnapshot) {
-              setSnapshot(maybeSnapshot);
+              applyRoomSnapshot(maybeSnapshot);
+            } else if (previousSnapshot) {
+              setSnapshot(previousSnapshot);
             }
+          } else if (previousSnapshot) {
+            setSnapshot(previousSnapshot);
           }
 
           setError(caught instanceof Error ? caught.message : "The action failed.");
@@ -252,13 +299,11 @@ export function RoomShell({ code }: RoomShellProps) {
       }
 
       const trimmedNickname = nickname.trim();
-      const nextSnapshot = await apiRequest<RoomSnapshot>(`/api/rooms/${normalizedCode}/join`, session.access_token, {
+      return apiRequest<RoomSnapshot>(`/api/rooms/${normalizedCode}/join`, session.access_token, {
         method: "POST",
         body: JSON.stringify({ nickname: trimmedNickname }),
       });
-
-      setSnapshot(nextSnapshot);
-    });
+    }, (currentSnapshot, viewerUserId) => applyOptimisticJoinSnapshot(currentSnapshot, viewerUserId, nickname.trim()));
   }
 
   function handleReady(ready: boolean) {
@@ -267,13 +312,13 @@ export function RoomShell({ code }: RoomShellProps) {
         return;
       }
 
-      const nextSnapshot = await apiRequest<RoomSnapshot>(`/api/rooms/${normalizedCode}/ready`, session.access_token, {
+      return apiRequest<RoomSnapshot>(`/api/rooms/${normalizedCode}/ready`, session.access_token, {
         method: "POST",
         body: JSON.stringify({ ready }),
       });
-
-      setSnapshot(nextSnapshot);
-    });
+    }, (currentSnapshot, viewerUserId, viewerNickname) =>
+      applyOptimisticReadySnapshot(currentSnapshot, viewerUserId, viewerNickname, ready),
+    );
   }
 
   function handlePlay(point: Point) {
@@ -282,13 +327,13 @@ export function RoomShell({ code }: RoomShellProps) {
         return;
       }
 
-      const nextSnapshot = await apiRequest<RoomSnapshot>(`/api/rooms/${normalizedCode}/move`, session.access_token, {
+      return apiRequest<RoomSnapshot>(`/api/rooms/${normalizedCode}/move`, session.access_token, {
         method: "POST",
         body: JSON.stringify(point),
       });
-
-      setSnapshot(nextSnapshot);
-    });
+    }, (currentSnapshot, viewerUserId, viewerNickname) =>
+      applyOptimisticMoveSnapshot(currentSnapshot, viewerUserId, viewerNickname, point),
+    );
   }
 
   function handleResign() {
@@ -297,12 +342,12 @@ export function RoomShell({ code }: RoomShellProps) {
         return;
       }
 
-      const nextSnapshot = await apiRequest<RoomSnapshot>(`/api/rooms/${normalizedCode}/resign`, session.access_token, {
+      return apiRequest<RoomSnapshot>(`/api/rooms/${normalizedCode}/resign`, session.access_token, {
         method: "POST",
       });
-
-      setSnapshot(nextSnapshot);
-    });
+    }, (currentSnapshot, viewerUserId, viewerNickname) =>
+      applyOptimisticResignSnapshot(currentSnapshot, viewerUserId, viewerNickname),
+    );
   }
 
   function handleRematch() {
@@ -311,12 +356,12 @@ export function RoomShell({ code }: RoomShellProps) {
         return;
       }
 
-      const nextSnapshot = await apiRequest<RoomSnapshot>(`/api/rooms/${normalizedCode}/rematch`, session.access_token, {
+      return apiRequest<RoomSnapshot>(`/api/rooms/${normalizedCode}/rematch`, session.access_token, {
         method: "POST",
       });
-
-      setSnapshot(nextSnapshot);
-    });
+    }, (currentSnapshot, viewerUserId, viewerNickname) =>
+      applyOptimisticRematchVoteSnapshot(currentSnapshot, viewerUserId, viewerNickname),
+    );
   }
 
   function handleRefresh() {
@@ -522,7 +567,7 @@ export function RoomShell({ code }: RoomShellProps) {
                     type="button"
                     onClick={handleJoin}
                     disabled={isPending}
-                    className="inline-flex items-center gap-2 rounded-full border border-[#85e3a1]/30 bg-[#85e3a1]/10 px-4 py-2 text-sm font-medium text-[#a1ffbb]"
+                    className="inline-flex items-center gap-2 rounded-full border border-[#85e3a1]/30 bg-[#85e3a1]/10 px-4 py-2 text-sm font-medium text-[#a1ffbb] transition-colors duration-150 enabled:hover:border-[#85e3a1]/55 enabled:hover:bg-[#85e3a1]/16 enabled:hover:text-[#cbffd7]"
                   >
                     <DoorOpen className="h-4 w-4" />
                     Join room
@@ -534,7 +579,7 @@ export function RoomShell({ code }: RoomShellProps) {
                     type="button"
                     onClick={() => handleReady(!currentSeat.ready)}
                     disabled={isPending || snapshot.waitingForOpponent}
-                    className="inline-flex items-center gap-2 rounded-full border border-[#f2c774]/30 bg-[#f2c774]/10 px-4 py-2 text-sm font-medium text-[#f7d797]"
+                    className="inline-flex items-center gap-2 rounded-full border border-[#f2c774]/30 bg-[#f2c774]/10 px-4 py-2 text-sm font-medium text-[#f7d797] transition-colors duration-150 enabled:hover:border-[#f2c774]/55 enabled:hover:bg-[#f2c774]/18 enabled:hover:text-[#ffe6a7]"
                   >
                     <ShieldAlert className="h-4 w-4" />
                     {currentSeat.ready ? "Cancel ready" : "Ready up"}
@@ -546,7 +591,7 @@ export function RoomShell({ code }: RoomShellProps) {
                     type="button"
                     onClick={handleResign}
                     disabled={isPending}
-                    className="inline-flex items-center gap-2 rounded-full border border-[#ff9c9c]/30 bg-[#ff9c9c]/10 px-4 py-2 text-sm font-medium text-[#ffb8b8]"
+                    className="inline-flex items-center gap-2 rounded-full border border-[#ff9c9c]/30 bg-[#ff9c9c]/10 px-4 py-2 text-sm font-medium text-[#ffb8b8] transition-colors duration-150 enabled:hover:border-[#ff9c9c]/55 enabled:hover:bg-[#ff9c9c]/18 enabled:hover:text-[#ffd1d1]"
                   >
                     <Flag className="h-4 w-4" />
                     Resign
@@ -558,7 +603,7 @@ export function RoomShell({ code }: RoomShellProps) {
                     type="button"
                     onClick={handleRematch}
                     disabled={isPending}
-                    className="inline-flex items-center gap-2 rounded-full border border-white/14 px-4 py-2 text-sm font-medium text-white/80"
+                    className="inline-flex items-center gap-2 rounded-full border border-white/14 px-4 py-2 text-sm font-medium text-white/80 transition-colors duration-150 enabled:hover:border-white/28 enabled:hover:bg-white/[0.06] enabled:hover:text-white"
                   >
                     <RotateCcw className="h-4 w-4" />
                     Vote rematch
