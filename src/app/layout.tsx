@@ -16,7 +16,7 @@ const monoFont = IBM_Plex_Mono({
 
 export const metadata: Metadata = {
   title: "Gomoku Protocol",
-  description: "Deployment-ready Gomoku with private rooms, Renju enforcement, and realtime play.",
+  description: "Deployment-ready Gomoku with private rooms, Renju enforcement, and lightweight live play.",
 };
 
 export default function RootLayout({

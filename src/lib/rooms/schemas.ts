@@ -16,6 +16,10 @@ export const createRoomSchema = z.object({
   nickname: nicknameSchema,
 });
 
+export const sessionSchema = z.object({
+  nickname: nicknameSchema,
+});
+
 export const joinRoomSchema = z.object({
   nickname: nicknameSchema,
 });

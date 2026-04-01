@@ -38,8 +38,8 @@ yarn-error.log*
 # vercel
 .vercel
 
-# supabase cli
-supabase/.temp
+# local database
+/data
 
 # typescript
 *.tsbuildinfo

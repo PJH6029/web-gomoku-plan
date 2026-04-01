@@ -5,10 +5,9 @@ import { useEffect, useState, useTransition } from "react";
 import { ArrowRight, Cloud, Crown, Swords } from "lucide-react";
 
 import { apiRequest, ApiClientError } from "@/lib/client-api";
-import { hasPublicSupabaseEnv } from "@/lib/env";
 import { roomCodeSchema } from "@/lib/rooms/schemas";
 import type { RoomSnapshot } from "@/lib/rooms/types";
-import { ensureBrowserSession } from "@/lib/supabase/client";
+import { ensureBrowserSession } from "@/lib/session/client";
 
 const NICKNAME_STORAGE_KEY = "gomoku.nickname";
 
@@ -30,7 +29,6 @@ export function HomeShell() {
   const [roomCode, setRoomCode] = useState("");
   const [error, setError] = useState<string | null>(null);
   const [isPending, startTransition] = useTransition();
-  const envReady = hasPublicSupabaseEnv();
 
   useEffect(() => {
     setNickname(getStoredNickname());
@@ -48,8 +46,8 @@ export function HomeShell() {
           }
 
           persistNickname(trimmedNickname);
-          const session = await ensureBrowserSession(trimmedNickname);
-          const snapshot = await apiRequest<RoomSnapshot>("/api/rooms", session.access_token, {
+          await ensureBrowserSession(trimmedNickname);
+          const snapshot = await apiRequest<RoomSnapshot>("/api/rooms", {
             method: "POST",
             body: JSON.stringify({ nickname: trimmedNickname }),
           });
@@ -75,9 +73,9 @@ export function HomeShell() {
           }
 
           persistNickname(trimmedNickname);
-          const session = await ensureBrowserSession(trimmedNickname);
+          await ensureBrowserSession(trimmedNickname);
 
-          await apiRequest<RoomSnapshot>(`/api/rooms/${parsedCode}/join`, session.access_token, {
+          await apiRequest<RoomSnapshot>(`/api/rooms/${parsedCode}/join`, {
             method: "POST",
             body: JSON.stringify({ nickname: trimmedNickname }),
           });
@@ -112,8 +110,8 @@ export function HomeShell() {
                 Deploy a head-to-head Gomoku board with room codes, clocks, and clean match state.
               </h1>
               <p className="max-w-2xl text-base leading-7 text-white/68 sm:text-lg">
-                Built for fast Vercel deployment, synchronized through Supabase, and tuned for serious private matches instead
-                of a generic demo board.
+                Built for fast Vercel deployment, synchronized through lightweight room polling, and tuned for serious private
+                matches instead of a generic demo board.
               </p>
             </div>
 
@@ -121,8 +119,8 @@ export function HomeShell() {
               {[
                 {
                   icon: <Cloud className="h-5 w-5" />,
-                  title: "Managed realtime",
-                  body: "Supabase channels and row-level access keep private rooms synced without a custom socket host.",
+                  title: "Lightweight sync",
+                  body: "Low-overhead room polling keeps private matches current without adding a dedicated realtime service.",
                 },
                 {
                   icon: <Swords className="h-5 w-5" />,
@@ -148,7 +146,7 @@ export function HomeShell() {
             <div className="absolute inset-x-0 top-0 h-px bg-[linear-gradient(90deg,transparent,rgba(255,255,255,0.5),transparent)]" />
             <div className="flex items-center justify-between text-[0.72rem] uppercase tracking-[0.32em] text-white/55">
               <span>Match access</span>
-              <span>{envReady ? "Supabase configured" : "Configure env first"}</span>
+              <span>Cookie session ready</span>
             </div>
 
             <div className="mt-8 space-y-8">
@@ -165,7 +163,7 @@ export function HomeShell() {
               <div className="grid gap-4 sm:grid-cols-2">
                 <button
                   type="button"
-                  disabled={!envReady || isPending}
+                  disabled={isPending}
                   onClick={startCreateRoom}
                   className="group flex min-h-36 flex-col justify-between rounded-[1.5rem] border border-white/10 bg-white/[0.04] p-5 text-left transition-transform duration-200 enabled:hover:-translate-y-1 enabled:hover:border-[#f2c774]/40"
                 >
@@ -190,7 +188,7 @@ export function HomeShell() {
                   />
                   <button
                     type="button"
-                    disabled={!envReady || isPending}
+                    disabled={isPending}
                     onClick={startJoinRoom}
                     className="mt-5 inline-flex items-center gap-2 text-sm font-medium text-[#85e3a1] transition-colors duration-200 hover:text-[#9cf5b7]"
                   >
@@ -201,12 +199,7 @@ export function HomeShell() {
               </div>
 
               {error ? <p className="text-sm text-[#ff9c9c]">{error}</p> : null}
-              {!envReady ? (
-                <p className="text-sm leading-6 text-white/58">
-                  Add `NEXT_PUBLIC_SUPABASE_URL`, `NEXT_PUBLIC_SUPABASE_ANON_KEY`, and `SUPABASE_SERVICE_ROLE_KEY` to start the
-                  live deployment path.
-                </p>
-              ) : null}
+              <p className="text-sm leading-6 text-white/58">Guest identity is stored in a signed cookie, not a third-party auth session.</p>
             </div>
           </div>
         </section>

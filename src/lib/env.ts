@@ -1,46 +1,44 @@
 import { z } from "zod";
 
-const publicEnvSchema = z.object({
-  NEXT_PUBLIC_SUPABASE_URL: z.string().url(),
-  NEXT_PUBLIC_SUPABASE_ANON_KEY: z.string().min(1),
+const serverEnvSchema = z.object({
+  DATABASE_URL: z.string().min(1),
+  DATABASE_AUTH_TOKEN: z.string().min(1).optional(),
+  SESSION_SECRET: z.string().min(32),
 });
 
-const serverEnvSchema = publicEnvSchema.extend({
-  SUPABASE_SERVICE_ROLE_KEY: z.string().min(1),
-});
-
-type PublicEnv = z.infer<typeof publicEnvSchema>;
 type ServerEnv = z.infer<typeof serverEnvSchema>;
 
-let publicEnvCache: PublicEnv | null = null;
 let serverEnvCache: ServerEnv | null = null;
 
-export function hasPublicSupabaseEnv() {
-  return publicEnvSchema.safeParse({
-    NEXT_PUBLIC_SUPABASE_URL: process.env.NEXT_PUBLIC_SUPABASE_URL,
-    NEXT_PUBLIC_SUPABASE_ANON_KEY: process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY,
-  }).success;
-}
-
-export function getPublicEnv(): PublicEnv {
-  if (!publicEnvCache) {
-    publicEnvCache = publicEnvSchema.parse({
-      NEXT_PUBLIC_SUPABASE_URL: process.env.NEXT_PUBLIC_SUPABASE_URL,
-      NEXT_PUBLIC_SUPABASE_ANON_KEY: process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY,
-    });
+function getDefaultDatabaseUrl() {
+  if (process.env.DATABASE_URL) {
+    return process.env.DATABASE_URL;
   }
 
-  return publicEnvCache;
+  if (process.env.NODE_ENV === "production") {
+    return undefined;
+  }
+
+  return "file:./data/gomoku.db";
 }
 
 export function getServerEnv(): ServerEnv {
   if (!serverEnvCache) {
+    const databaseUrl = getDefaultDatabaseUrl();
+    const sessionSecret =
+      process.env.SESSION_SECRET ??
+      (process.env.NODE_ENV === "production" ? undefined : "development-session-secret-change-me");
+
     serverEnvCache = serverEnvSchema.parse({
-      NEXT_PUBLIC_SUPABASE_URL: process.env.NEXT_PUBLIC_SUPABASE_URL,
-      NEXT_PUBLIC_SUPABASE_ANON_KEY: process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY,
-      SUPABASE_SERVICE_ROLE_KEY: process.env.SUPABASE_SERVICE_ROLE_KEY,
+      DATABASE_URL: databaseUrl,
+      DATABASE_AUTH_TOKEN: process.env.DATABASE_AUTH_TOKEN || undefined,
+      SESSION_SECRET: sessionSecret,
     });
   }
 
   return serverEnvCache;
+}
+
+export function resetEnvCacheForTests() {
+  serverEnvCache = null;
 }

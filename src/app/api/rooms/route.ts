@@ -5,10 +5,11 @@ import { createRoom } from "@/lib/rooms/service";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
+export const preferredRegion = "hnd1";
 
 export async function POST(request: Request) {
   try {
-    const user = await requireRequestUser(request);
+    const user = await requireRequestUser();
     const body = await parseRequestBody(request, createRoomSchema);
     const snapshot = await createRoom(user.id, body.nickname);
 

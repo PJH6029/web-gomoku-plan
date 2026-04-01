@@ -1,3 +1,4 @@
+import { NextResponse } from "next/server";
 import { ZodError, type ZodType } from "zod";
 
 import { AppError, getErrorMessage, isAppError } from "@/lib/errors";
@@ -33,7 +34,7 @@ export async function parseRequestBody<T>(request: Request, schema: ZodType<T>) 
 }
 
 export function jsonSuccess<T>(data: T, status = 200) {
-  return Response.json(
+  return NextResponse.json(
     {
       ok: true,
       data,
@@ -44,7 +45,7 @@ export function jsonSuccess<T>(data: T, status = 200) {
 
 export function jsonError(error: unknown, scope = "api") {
   if (isAppError(error)) {
-    return Response.json(
+    return NextResponse.json(
       {
         ok: false,
         error: {
@@ -59,7 +60,7 @@ export function jsonError(error: unknown, scope = "api") {
 
   logError(scope, error);
 
-  return Response.json(
+  return NextResponse.json(
     {
       ok: false,
       error: {

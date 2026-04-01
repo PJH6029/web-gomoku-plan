@@ -1,6 +1,5 @@
 "use client";
 
-import { type RealtimeChannel, type Session } from "@supabase/supabase-js";
 import { AlertTriangle, Clock3, Copy, DoorOpen, Flag, LoaderCircle, RefreshCcw, RotateCcw, ShieldAlert } from "lucide-react";
 import { useEffect, useEffectEvent, useState, useTransition } from "react";
 
@@ -8,7 +7,6 @@ import { GomokuBoard } from "@/components/gomoku-board";
 import { apiRequest, ApiClientError } from "@/lib/client-api";
 import { getForbiddenBlackPoints } from "@/lib/game/renju";
 import type { Point } from "@/lib/game/types";
-import { hasPublicSupabaseEnv } from "@/lib/env";
 import { roomCodeSchema } from "@/lib/rooms/schemas";
 import {
   applyOptimisticJoinSnapshot,
@@ -16,12 +14,13 @@ import {
   applyOptimisticReadySnapshot,
   applyOptimisticRematchVoteSnapshot,
   applyOptimisticResignSnapshot,
-  reconcileSnapshotForViewer,
 } from "@/lib/rooms/snapshot";
 import type { RoomSnapshot } from "@/lib/rooms/types";
-import { ensureBrowserSession, getBrowserSupabaseClient } from "@/lib/supabase/client";
+import { ensureBrowserSession } from "@/lib/session/client";
 
 const NICKNAME_STORAGE_KEY = "gomoku.nickname";
+const VISIBLE_POLL_INTERVAL_MS = 1000;
+const HIDDEN_POLL_INTERVAL_MS = 5000;
 
 function getStoredNickname() {
   if (typeof window === "undefined") {
@@ -48,94 +47,54 @@ function formatRemaining(deadlineAt: string | null, now: number) {
   return remaining.toString().padStart(2, "0");
 }
 
-function extractPresenceUserIds(presenceState: Record<string, Array<{ userId?: string }>>) {
-  const userIds = new Set<string>();
-
-  Object.values(presenceState).forEach((entries) => {
-    entries.forEach((entry) => {
-      if (typeof entry.userId === "string") {
-        userIds.add(entry.userId);
-      }
-    });
-  });
-
-  return userIds;
-}
-
 interface RoomShellProps {
   code: string;
 }
 
 export function RoomShell({ code }: RoomShellProps) {
   const normalizedCode = roomCodeSchema.parse(code);
-  const envReady = hasPublicSupabaseEnv();
   const [nickname, setNickname] = useState("");
-  const [session, setSession] = useState<Session | null>(null);
   const [snapshot, setSnapshot] = useState<RoomSnapshot | null>(null);
-  const [presenceIds, setPresenceIds] = useState<Set<string>>(new Set());
   const [error, setError] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
   const [now, setNow] = useState(Date.now());
+  const [isDocumentHidden, setIsDocumentHidden] = useState(false);
   const [isPending, startTransition] = useTransition();
-  const isSeated = snapshot?.viewer.role !== null;
 
-  function applyRoomSnapshot(nextSnapshot: RoomSnapshot, nextSession: Session | null = session, nextNickname: string | null = nickname) {
-    if (!nextSession) {
-      setSnapshot(nextSnapshot);
-      return;
-    }
-
-    setSnapshot(reconcileSnapshotForViewer(nextSnapshot, nextSession.user.id, nextNickname));
-  }
-
-  async function loadSnapshot(nextSession: Session, nextNickname: string) {
-    const nextSnapshot = await apiRequest<RoomSnapshot>(`/api/rooms/${normalizedCode}`, nextSession.access_token, {
+  async function loadSnapshot(nextNickname: string) {
+    const nextSnapshot = await apiRequest<RoomSnapshot>(`/api/rooms/${normalizedCode}`, {
       method: "GET",
     });
 
-    setSession(nextSession);
+    setSnapshot(nextSnapshot);
     setNickname(nextNickname);
-    applyRoomSnapshot(nextSnapshot, nextSession, nextNickname);
+
+    return nextSnapshot;
   }
 
   async function bootstrap(nextNickname: string) {
     persistNickname(nextNickname);
-    const nextSession = await ensureBrowserSession(nextNickname);
-    await loadSnapshot(nextSession, nextNickname);
+    await ensureBrowserSession(nextNickname);
+    await loadSnapshot(nextNickname);
   }
 
   const bootstrapFromEffect = useEffectEvent(async (nextNickname: string) => {
     await bootstrap(nextNickname);
   });
 
-  const refreshFromEffect = useEffectEvent(async () => {
-    if (session) {
-      await loadSnapshot(session, nickname);
-    }
-  });
-
-  const applyIncomingSnapshotFromEffect = useEffectEvent((nextSnapshot: RoomSnapshot) => {
-    applyRoomSnapshot(nextSnapshot);
-  });
-
-  const trackPresenceFromEffect = useEffectEvent(async (presenceChannel: RealtimeChannel) => {
-    if (!session || !snapshot?.viewer.role) {
+  const pollSnapshotFromEffect = useEffectEvent(async () => {
+    if (!snapshot) {
       return;
     }
 
-    await presenceChannel.track({
-      userId: session.user.id,
-      nickname: snapshot.viewer.nickname ?? nickname,
-      role: snapshot.viewer.role,
+    const nextSnapshot = await apiRequest<RoomSnapshot>(`/api/rooms/${normalizedCode}`, {
+      method: "GET",
     });
+
+    setSnapshot(nextSnapshot);
   });
 
   useEffect(() => {
-    if (!envReady) {
-      setLoading(false);
-      return;
-    }
-
     const storedNickname = getStoredNickname();
     setNickname(storedNickname);
 
@@ -153,7 +112,7 @@ export function RoomShell({ code }: RoomShellProps) {
         setLoading(false);
       }
     })();
-  }, [envReady, normalizedCode]);
+  }, []);
 
   useEffect(() => {
     const interval = window.setInterval(() => setNow(Date.now()), 1000);
@@ -161,97 +120,62 @@ export function RoomShell({ code }: RoomShellProps) {
   }, []);
 
   useEffect(() => {
-    if (!envReady) {
-      return;
-    }
+    const updateVisibility = () => {
+      setIsDocumentHidden(document.visibilityState === "hidden");
+    };
 
-    const supabase = getBrowserSupabaseClient();
-    const { data } = supabase.auth.onAuthStateChange((_event, nextSession) => {
-      setSession(nextSession);
-    });
+    updateVisibility();
+    document.addEventListener("visibilitychange", updateVisibility);
 
     return () => {
-      data.subscription.unsubscribe();
+      document.removeEventListener("visibilitychange", updateVisibility);
     };
-  }, [envReady]);
+  }, []);
 
   useEffect(() => {
-    if (!session || !isSeated) {
+    if (!snapshot || isPending) {
       return;
     }
 
-    const supabase = getBrowserSupabaseClient();
-    const eventsChannel = supabase
-      .channel(`room-events:${normalizedCode}:${session.user.id}`)
-      .on(
-        "postgres_changes",
-        {
-          event: "INSERT",
-          schema: "public",
-          table: "room_events",
-          filter: `room_code=eq.${normalizedCode}`,
-        },
-        (payload) => {
-          if (payload.new.payload && typeof payload.new.payload === "object") {
-            applyIncomingSnapshotFromEffect(payload.new.payload as RoomSnapshot);
-          }
-        },
-      )
-      .subscribe();
+    let cancelled = false;
+    let timeoutId = 0;
 
-    const presenceChannel = supabase
-      .channel(`room-presence:${normalizedCode}`, {
-        config: {
-          private: true,
-          presence: {
-            key: session.user.id,
-          },
-        },
-      })
-      .on("presence", { event: "sync" }, () => {
-        setPresenceIds(extractPresenceUserIds(presenceChannel.presenceState() as Record<string, Array<{ userId?: string }>>));
-      })
-      .subscribe(async (status) => {
-        if (status === "SUBSCRIBED") {
-          await trackPresenceFromEffect(presenceChannel);
+    const tick = async () => {
+      try {
+        await pollSnapshotFromEffect();
+      } catch {
+        // Silent retry on the next polling interval.
+      } finally {
+        if (!cancelled) {
+          timeoutId = window.setTimeout(tick, isDocumentHidden ? HIDDEN_POLL_INTERVAL_MS : VISIBLE_POLL_INTERVAL_MS);
         }
-      });
+      }
+    };
+
+    timeoutId = window.setTimeout(tick, isDocumentHidden ? HIDDEN_POLL_INTERVAL_MS : VISIBLE_POLL_INTERVAL_MS);
 
     return () => {
-      void supabase.removeChannel(eventsChannel);
-      void supabase.removeChannel(presenceChannel);
+      cancelled = true;
+      window.clearTimeout(timeoutId);
     };
-  }, [envReady, isSeated, nickname, normalizedCode, session]);
+  }, [isDocumentHidden, isPending, snapshot]);
 
-  useEffect(() => {
-    if (!session || !snapshot?.game?.deadlineAt || snapshot.game.status !== "active") {
-      return;
-    }
-
-    if (new Date(snapshot.game.deadlineAt).getTime() > now) {
-      return;
-    }
-
-    void refreshFromEffect();
-  }, [nickname, now, session, snapshot?.game?.deadlineAt, snapshot?.game?.status]);
-
-  function runAction(
-    action: () => Promise<RoomSnapshot | void>,
-    optimisticUpdate?: (currentSnapshot: RoomSnapshot, viewerUserId: string, viewerNickname: string | null) => RoomSnapshot,
-  ) {
+  function runAction(action: () => Promise<RoomSnapshot | void>, optimisticUpdate?: (currentSnapshot: RoomSnapshot) => RoomSnapshot) {
     startTransition(() => {
       void (async () => {
         let previousSnapshot: RoomSnapshot | null = null;
 
         try {
           setError(null);
-          if (optimisticUpdate && session && snapshot) {
+
+          if (optimisticUpdate && snapshot) {
             previousSnapshot = snapshot;
-            setSnapshot(optimisticUpdate(snapshot, session.user.id, snapshot.viewer.nickname ?? nickname));
+            setSnapshot(optimisticUpdate(snapshot));
           }
+
           const nextSnapshot = await action();
           if (nextSnapshot) {
-            applyRoomSnapshot(nextSnapshot);
+            setSnapshot(nextSnapshot);
           }
         } catch (caught) {
           if (caught instanceof ApiClientError) {
@@ -265,7 +189,7 @@ export function RoomShell({ code }: RoomShellProps) {
                 : null;
 
             if (maybeSnapshot) {
-              applyRoomSnapshot(maybeSnapshot);
+              setSnapshot(maybeSnapshot);
             } else if (previousSnapshot) {
               setSnapshot(previousSnapshot);
             }
@@ -286,100 +210,64 @@ export function RoomShell({ code }: RoomShellProps) {
       }
 
       const trimmedNickname = nickname.trim();
-      const nextSession = await ensureBrowserSession(trimmedNickname);
-      persistNickname(trimmedNickname);
-      await loadSnapshot(nextSession, trimmedNickname);
+      await bootstrap(trimmedNickname);
     });
   }
 
   function handleJoin() {
     runAction(async () => {
-      if (!session) {
-        throw new Error("Connect a session before joining.");
-      }
-
       const trimmedNickname = nickname.trim();
-      return apiRequest<RoomSnapshot>(`/api/rooms/${normalizedCode}/join`, session.access_token, {
+      await ensureBrowserSession(trimmedNickname);
+
+      return apiRequest<RoomSnapshot>(`/api/rooms/${normalizedCode}/join`, {
         method: "POST",
         body: JSON.stringify({ nickname: trimmedNickname }),
       });
-    }, (currentSnapshot, viewerUserId) => applyOptimisticJoinSnapshot(currentSnapshot, viewerUserId, nickname.trim()));
+    }, (currentSnapshot) => applyOptimisticJoinSnapshot(currentSnapshot, currentSnapshot.viewer.userId, nickname.trim()));
   }
 
   function handleReady(ready: boolean) {
     runAction(async () => {
-      if (!session) {
-        return;
-      }
-
-      return apiRequest<RoomSnapshot>(`/api/rooms/${normalizedCode}/ready`, session.access_token, {
+      return apiRequest<RoomSnapshot>(`/api/rooms/${normalizedCode}/ready`, {
         method: "POST",
         body: JSON.stringify({ ready }),
       });
-    }, (currentSnapshot, viewerUserId, viewerNickname) =>
-      applyOptimisticReadySnapshot(currentSnapshot, viewerUserId, viewerNickname, ready),
-    );
+    }, (currentSnapshot) => applyOptimisticReadySnapshot(currentSnapshot, currentSnapshot.viewer.userId, currentSnapshot.viewer.nickname, ready));
   }
 
   function handlePlay(point: Point) {
     runAction(async () => {
-      if (!session) {
-        return;
-      }
-
-      return apiRequest<RoomSnapshot>(`/api/rooms/${normalizedCode}/move`, session.access_token, {
+      return apiRequest<RoomSnapshot>(`/api/rooms/${normalizedCode}/move`, {
         method: "POST",
         body: JSON.stringify(point),
       });
-    }, (currentSnapshot, viewerUserId, viewerNickname) =>
-      applyOptimisticMoveSnapshot(currentSnapshot, viewerUserId, viewerNickname, point),
-    );
+    }, (currentSnapshot) => applyOptimisticMoveSnapshot(currentSnapshot, currentSnapshot.viewer.userId, currentSnapshot.viewer.nickname, point));
   }
 
   function handleResign() {
     runAction(async () => {
-      if (!session) {
-        return;
-      }
-
-      return apiRequest<RoomSnapshot>(`/api/rooms/${normalizedCode}/resign`, session.access_token, {
+      return apiRequest<RoomSnapshot>(`/api/rooms/${normalizedCode}/resign`, {
         method: "POST",
       });
-    }, (currentSnapshot, viewerUserId, viewerNickname) =>
-      applyOptimisticResignSnapshot(currentSnapshot, viewerUserId, viewerNickname),
-    );
+    }, (currentSnapshot) => applyOptimisticResignSnapshot(currentSnapshot, currentSnapshot.viewer.userId, currentSnapshot.viewer.nickname));
   }
 
   function handleRematch() {
     runAction(async () => {
-      if (!session) {
-        return;
-      }
-
-      return apiRequest<RoomSnapshot>(`/api/rooms/${normalizedCode}/rematch`, session.access_token, {
+      return apiRequest<RoomSnapshot>(`/api/rooms/${normalizedCode}/rematch`, {
         method: "POST",
       });
-    }, (currentSnapshot, viewerUserId, viewerNickname) =>
-      applyOptimisticRematchVoteSnapshot(currentSnapshot, viewerUserId, viewerNickname),
+    }, (currentSnapshot) =>
+      applyOptimisticRematchVoteSnapshot(currentSnapshot, currentSnapshot.viewer.userId, currentSnapshot.viewer.nickname),
     );
   }
 
   function handleRefresh() {
     runAction(async () => {
-      if (!session) {
-        return;
-      }
-
-      await loadSnapshot(session, nickname);
+      return loadSnapshot(nickname);
     });
   }
 
-  const seatMap = snapshot
-    ? snapshot.seats.map((seat) => ({
-        ...seat,
-        online: seat.userId ? presenceIds.has(seat.userId) : false,
-      }))
-    : [];
   const currentSeat = snapshot?.seats.find((seat) => seat.role === snapshot.viewer.role) ?? null;
   const boardRows = snapshot?.game?.boardRows ?? Array.from({ length: 15 }, () => ".".repeat(15));
   const lastMove = snapshot?.game?.moves.at(-1)
@@ -394,18 +282,6 @@ export function RoomShell({ code }: RoomShellProps) {
     });
   }
 
-  if (!envReady) {
-    return (
-      <main className="mx-auto flex min-h-screen max-w-3xl flex-col justify-center px-6 py-12">
-        <p className="text-sm uppercase tracking-[0.3em] text-white/45">Configuration required</p>
-        <h1 className="mt-4 text-4xl font-semibold text-white">Supabase credentials are required before this room can run.</h1>
-        <p className="mt-4 text-base leading-7 text-white/64">
-          Copy the variables from `.env.example`, add your project values, run the SQL migration, and reload the app.
-        </p>
-      </main>
-    );
-  }
-
   if (loading) {
     return (
       <main className="flex min-h-screen items-center justify-center">
@@ -414,13 +290,14 @@ export function RoomShell({ code }: RoomShellProps) {
     );
   }
 
-  if (!session || !snapshot) {
+  if (!snapshot) {
     return (
       <main className="mx-auto flex min-h-screen max-w-3xl flex-col justify-center px-6 py-12">
         <p className="text-sm uppercase tracking-[0.3em] text-white/45">Enter room</p>
         <h1 className="mt-4 text-4xl font-semibold text-white">Room {normalizedCode}</h1>
         <p className="mt-4 max-w-xl text-base leading-7 text-white/64">
-          Anonymous play is used for room identity. Add the nickname you want attached to this match, then load the room state.
+          Signed guest cookies keep this browser attached to its seat. Add the nickname you want on this match, then load the
+          room state.
         </p>
         <div className="mt-10 flex flex-col gap-4 sm:flex-row sm:items-end">
           <label className="flex-1">
@@ -457,7 +334,8 @@ export function RoomShell({ code }: RoomShellProps) {
               <p className="text-[0.72rem] uppercase tracking-[0.32em] text-white/45">Live room</p>
               <h1 className="mt-3 text-4xl font-semibold text-white sm:text-5xl">{normalizedCode}</h1>
               <p className="mt-3 max-w-2xl text-sm leading-6 text-white/60">
-                Simplified Renju room play with center opening, black forbidden points, a per-turn countdown, and server-verified state.
+                Lightweight live play uses signed guest sessions, optimistic local actions, and short polling instead of a
+                dedicated realtime service.
               </p>
             </div>
             <div className="flex flex-wrap items-center gap-3">
@@ -530,7 +408,7 @@ export function RoomShell({ code }: RoomShellProps) {
 
           <div className="mt-5 space-y-5">
             <div className="space-y-4">
-              {seatMap.map((seat) => (
+              {snapshot.seats.map((seat) => (
                 <div key={seat.role} className="border-t border-white/8 pt-4">
                   <div className="flex items-center justify-between">
                     <div>
@@ -539,12 +417,6 @@ export function RoomShell({ code }: RoomShellProps) {
                         {seat.nickname ?? "Open seat"} <span className="text-white/38">· {seat.stone}</span>
                       </p>
                     </div>
-                    <span
-                      className={[
-                        "inline-flex h-2.5 w-2.5 rounded-full",
-                        seat.online ? "bg-[#85e3a1]" : "bg-white/15",
-                      ].join(" ")}
-                    />
                   </div>
                   <p className="mt-2 text-sm text-white/55">
                     {seat.userId
@@ -637,9 +509,7 @@ export function RoomShell({ code }: RoomShellProps) {
               <p className="text-[0.68rem] uppercase tracking-[0.24em] text-white/40">Status</p>
               <div className="mt-4 space-y-3 text-sm leading-6 text-white/62">
                 {snapshot.waitingForOpponent ? <p>Waiting for the guest seat to be filled.</p> : null}
-                {snapshot.game?.status === "active" ? (
-                  <p>The move clock resets to 45 seconds after every legal turn.</p>
-                ) : null}
+                {snapshot.game?.status === "active" ? <p>The move clock resets to 45 seconds after every legal turn.</p> : null}
                 {snapshot.game?.status === "finished" && snapshot.game.winner ? (
                   <p className="capitalize">{snapshot.game.winner} won this game.</p>
                 ) : null}

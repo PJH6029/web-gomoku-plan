@@ -14,12 +14,12 @@ export class ApiClientError extends Error {
   }
 }
 
-export async function apiRequest<T>(url: string, token: string, init?: RequestInit) {
+export async function apiRequest<T>(url: string, init?: RequestInit) {
   const response = await fetch(url, {
+    credentials: "same-origin",
     ...init,
     headers: {
       "content-type": "application/json",
-      authorization: `Bearer ${token}`,
       ...init?.headers,
     },
   });

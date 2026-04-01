@@ -10,5 +10,5 @@ test("home page renders the room controls", async ({ page }) => {
 test("room route renders a fallback surface without crashing", async ({ page }) => {
   await page.goto("/room/ROOM42");
 
-  await expect(page.locator("body")).toContainText(/room room42|supabase credentials are required/i);
+  await expect(page.locator("body")).toContainText(/room room42|load room/i);
 });

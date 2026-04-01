@@ -29,7 +29,6 @@ function createBaseSnapshot(): RoomSnapshot {
         nickname: "host-player",
         ready: false,
         stone: "black",
-        online: false,
       },
       {
         role: "guest",
@@ -37,7 +36,6 @@ function createBaseSnapshot(): RoomSnapshot {
         nickname: "guest-player",
         ready: false,
         stone: "white",
-        online: false,
       },
     ],
     game: null,

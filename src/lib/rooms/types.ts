@@ -2,14 +2,6 @@ import type { BoardRows, GameResultReason, GameStatus, MoveRecord, Point, RenjuV
 
 export type RoomStatus = "waiting" | "active" | "finished" | "abandoned";
 export type SeatRole = "host" | "guest";
-export type RoomEventType =
-  | "room_created"
-  | "room_joined"
-  | "room_updated"
-  | "game_started"
-  | "move_played"
-  | "game_finished"
-  | "rematch_started";
 
 export interface RoomSeatSnapshot {
   role: SeatRole;
@@ -17,7 +9,6 @@ export interface RoomSeatSnapshot {
   nickname: string | null;
   ready: boolean;
   stone: Stone;
-  online: boolean;
 }
 
 export interface RoomViewer {
